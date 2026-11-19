@@ -1,7 +1,31 @@
+
+# Environment variables and secrets
 .env
-venv/
-__pycache__/
-*.pyc
+.env.*
+!.env.example
+
+# Google authentication credentials
 credentials.json
 token.json
-mindease.db
+client_secret*.json
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Python virtual environment
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Backup files
+app_backup.py
+*.bak
+
+# IDE settings
+.vscode/
+.idea/
