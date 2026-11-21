@@ -1,8 +1,8 @@
 """
 security.py - security helpers for MindEase AI.
 
-Put this file next to your app file and import from it.
-Contains: input cleaning, markdown/URL sanitising, rate limiting,
+Put this file next to app.py and import from it.
+Contains input cleaning, markdown/URL sanitising, rate limiting,
 and a pure-ASGI middleware (security headers, host check, body limit,
 per-IP request limits, upload blocking).
 """
@@ -24,21 +24,16 @@ from urllib.parse import quote, urlparse
 
 log = logging.getLogger("mindease.security")
 
-# ---------------------------------------------------------------
-# Limits (change here, one place)
-# ---------------------------------------------------------------
+# Limits
 MAX_THOUGHTS = 4000
 MAX_QUERY = 300
 MAX_TITLE = 200
 MAX_NOTES = 1000
 MAX_REMINDERS_PER_USER = 200
 ALLOWED_LEADS = {"0", "5", "15", "30"}
-DAILY_AI_CAP = int(os.getenv("DAILY_AI_CAP", "500"))  # all users together
+DAILY_AI_CAP = int(os.getenv("DAILY_AI_CAP", "500"))
 
-# ---------------------------------------------------------------
 # Input cleaning
-# ---------------------------------------------------------------
-# control characters + invisible bidi-override characters
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u202a-\u202e\u2066-\u2069]")
 
 
@@ -57,7 +52,7 @@ def clean_text(value, max_len, *, multiline=True):
 def md_escape(value, max_len=500):
     """Make untrusted text safe to place inside Markdown."""
     text = _CTRL.sub("", str(value or ""))[:max_len]
-    text = html.escape(text, quote=True)  # neutralises raw HTML tags
+    text = html.escape(text, quote=True)
     return re.sub(r"([\\`*_{}\[\]()#+\-!|~$])", r"\\\1", text)
 
 
@@ -66,7 +61,7 @@ def safe_link_url(url):
     if not isinstance(url, str):
         return ""
     url = html.unescape(url).strip().replace(" ", "%20")
-    if not url or len(url) > 2000 or re.search(r"[\s\x00-\x1f\x7f]", url):
+    if not url or len(url) > 2000 or re.search(r"[\x00-\x1f\x7f]", url):
         return ""
     try:
         parsed = urlparse(url)
@@ -77,15 +72,13 @@ def safe_link_url(url):
         return ""
     if parsed.username or parsed.password:
         return ""
-    # quote() also encodes ( ) ' " < > ` so a URL cannot break out of the link
     return quote(url, safe=":/?#[]@!$&*+,;=%-._~")
 
 
-# ---------------------------------------------------------------
 # E-mail check, signed tokens, cookies
-# ---------------------------------------------------------------
 _EMAIL_RE = re.compile(
-    r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9]"
+    r"(?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+"
 )
 
@@ -99,20 +92,23 @@ def _b64e(raw):
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
-def _b64d(text):
-    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+def _b64d(value):
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
 def _key(purpose):
     secret = os.getenv("OTP_SECRET", "").strip()
     if len(secret) < 32:
         raise RuntimeError("OTP_SECRET is missing or too short.")
-    return hmac.new(secret.encode("utf-8"), b"mindease:" + purpose.encode("utf-8"),
-                    hashlib.sha256).digest()
+    return hmac.new(
+        secret.encode("utf-8"),
+        b"mindease:" + purpose.encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
 
 
 def sign_token(payload, purpose, ttl):
-    """Tamper-proof, expiring token (HMAC-SHA256). Used for the OAuth state cookie."""
+    """Tamper-proof, expiring token (HMAC-SHA256)."""
     body = dict(payload)
     body["pur"] = purpose
     body["exp"] = int(time.time()) + int(ttl)
@@ -122,10 +118,12 @@ def sign_token(payload, purpose, ttl):
 
 
 def verify_token(token, purpose):
-    """Return the payload if the signature, purpose and expiry are valid, else None."""
+    """Return payload if signature, purpose and expiry are valid; otherwise None."""
     try:
         raw, sig = str(token or "").split(".", 1)
-        expected = _b64e(hmac.new(_key(purpose), raw.encode("ascii"), hashlib.sha256).digest())
+        expected = _b64e(
+            hmac.new(_key(purpose), raw.encode("ascii"), hashlib.sha256).digest()
+        )
         if not hmac.compare_digest(sig, expected):
             return None
         body = json.loads(_b64d(raw))
@@ -146,9 +144,7 @@ def cookie_from_header(cookie_header, name):
         return ""
 
 
-# ---------------------------------------------------------------
 # Rate limiting (in-memory, thread-safe)
-# ---------------------------------------------------------------
 class RateLimiter:
     def __init__(self):
         self._hits = {}
@@ -166,14 +162,15 @@ class RateLimiter:
             q.append(now)
             if now - self._last_gc > 300:
                 self._last_gc = now
-                for k in [k for k, d in self._hits.items()
-                          if not d or now - d[-1] > 86400]:
-                    del self._hits[k]
+                for old_key in [
+                    k for k, hits in self._hits.items()
+                    if not hits or now - hits[-1] > 86400
+                ]:
+                    del self._hits[old_key]
             return True
 
 
 limiter = RateLimiter()
-
 TRUST_PROXY = os.getenv("TRUST_PROXY", "0").strip() == "1"
 try:
     PROXY_HOPS = max(1, int(os.getenv("TRUSTED_PROXY_HOPS", "1")))
@@ -182,9 +179,9 @@ except ValueError:
 
 
 def client_ip(peer, forwarded_for=""):
-    """X-Forwarded-For is only trusted when TRUST_PROXY=1 (set it behind nginx etc.)."""
+    """Trust X-Forwarded-For only when TRUST_PROXY=1."""
     if TRUST_PROXY and forwarded_for:
-        parts = [p.strip() for p in forwarded_for.split(",") if p.strip()]
+        parts = [part.strip() for part in forwarded_for.split(",") if part.strip()]
         if len(parts) >= PROXY_HOPS:
             return parts[-PROXY_HOPS][:64]
     return str(peer or "unknown")[:64]
@@ -192,13 +189,15 @@ def client_ip(peer, forwarded_for=""):
 
 def gradio_ip(request):
     try:
-        return client_ip(request.client.host, request.headers.get("x-forwarded-for", ""))
+        return client_ip(
+            request.client.host, request.headers.get("x-forwarded-for", "")
+        )
     except Exception:
         return "unknown"
 
 
 def ai_limit_message(request, bucket, limit, window):
-    """Return an error message if this caller is over the limit, else None."""
+    """Return an error message if caller is over limit, else None."""
     ip = gradio_ip(request)
     if not limiter.allow(f"{bucket}:{ip}", limit, window):
         return "You're going a little fast. Please wait a few minutes and try again."
@@ -207,13 +206,9 @@ def ai_limit_message(request, bucket, limit, window):
     return None
 
 
-# ---------------------------------------------------------------
 # ASGI middleware
-# ---------------------------------------------------------------
 _CSP = (
     "default-src 'self'; "
-    # 'unsafe-inline' = your inline HEAD script; 'unsafe-eval' = Gradio's gr.HTML
-    # component evaluates JS strings internally (without it every HTML block fails).
     "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
     "font-src 'self' data: https://fonts.gstatic.com; "
@@ -237,7 +232,9 @@ class SecurityMiddleware:
     def __init__(self, app):
         self.app = app
         self.allowed_hosts = {
-            _host_only(h) for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()
+            _host_only(host)
+            for host in os.getenv("ALLOWED_HOSTS", "").split(",")
+            if host.strip()
         }
         self.csp_mode = os.getenv("CSP_MODE", "enforce").strip().lower()
         try:
@@ -250,8 +247,7 @@ class SecurityMiddleware:
             ("x-content-type-options", "nosniff"),
             ("x-frame-options", "DENY"),
             ("referrer-policy", "strict-origin-when-cross-origin"),
-            ("permissions-policy",
-             "camera=(), microphone=(), geolocation=(), payment=(), usb=()"),
+            ("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()"),
             ("cross-origin-opener-policy", "same-origin"),
             ("cross-origin-resource-policy", "same-origin"),
         ]
@@ -263,11 +259,16 @@ class SecurityMiddleware:
             items.append(("strict-transport-security", "max-age=31536000; includeSubDomains"))
         return items
 
-    async def _reject(self, send, status, text, https, extra=()):
-        body = text.encode("utf-8")
-        headers = [(b"content-type", b"text/plain; charset=utf-8"),
-                   (b"content-length", str(len(body)).encode())]
-        headers += [(k.encode(), v.encode()) for k, v in list(extra) + self._security_headers(https)]
+    async def _reject(self, send, status, message, https, extra=()):
+        body = message.encode("utf-8")
+        headers = [
+            (b"content-type", b"text/plain; charset=utf-8"),
+            (b"content-length", str(len(body)).encode()),
+        ]
+        headers += [
+            (key.encode(), value.encode())
+            for key, value in list(extra) + self._security_headers(https)
+        ]
         await send({"type": "http.response.start", "status": status, "headers": headers})
         await send({"type": "http.response.body", "body": body})
 
@@ -276,12 +277,16 @@ class SecurityMiddleware:
             await self.app(scope, receive, send)
             return
 
-        h = {k.decode("latin-1").lower(): v.decode("latin-1")
-             for k, v in scope.get("headers", [])}
-        https = scope.get("scheme") in ("https", "wss") or \
-            h.get("x-forwarded-proto", "").lower() == "https"
+        headers_in = {
+            key.decode("latin-1").lower(): value.decode("latin-1")
+            for key, value in scope.get("headers", [])
+        }
+        https = (
+            scope.get("scheme") in ("https", "wss")
+            or headers_in.get("x-forwarded-proto", "").lower() == "https"
+        )
 
-        if self.allowed_hosts and _host_only(h.get("host", "")) not in self.allowed_hosts:
+        if self.allowed_hosts and _host_only(headers_in.get("host", "")) not in self.allowed_hosts:
             if scope["type"] == "http":
                 await self._reject(send, 400, "Invalid host.", https)
             else:
@@ -294,42 +299,45 @@ class SecurityMiddleware:
 
         method = scope.get("method", "GET").upper()
         path = scope.get("path", "")
-
         try:
-            too_big = int(h.get("content-length", "0")) > self.max_body
+            too_big = int(headers_in.get("content-length", "0")) > self.max_body
         except ValueError:
             too_big = True
         if too_big:
             await self._reject(send, 413, "Request too large.", https)
             return
 
-        # This app has no file uploads, so close that door completely.
         if method == "POST" and "/upload" in path:
             await self._reject(send, 403, "Uploads are disabled.", https)
             return
 
         peer = (scope.get("client") or ("unknown", 0))[0]
-        ip = client_ip(peer, h.get("x-forwarded-for", ""))
-
+        ip = client_ip(peer, headers_in.get("x-forwarded-for", ""))
         is_api = method == "POST" and any(
-            s in path for s in ("/queue/join", "/run/", "/call/", "/api/"))
+            marker in path for marker in ("/queue/join", "/run/", "/call/", "/api/")
+        )
         ok = limiter.allow(f"http:{ip}", 600, 60)
         if ok and is_api:
             ok = limiter.allow(f"api:{ip}", 40, 60)
         if not ok:
-            await self._reject(send, 429, "Too many requests. Please slow down.",
-                               https, extra=[("retry-after", "60")])
+            await self._reject(
+                send, 429, "Too many requests. Please slow down.", https,
+                extra=[("retry-after", "60")],
+            )
             return
 
         sec = self._security_headers(https)
-        names = {k for k, _ in sec}
+        names = {key for key, _ in sec}
 
         async def send_wrapper(message):
             if message["type"] == "http.response.start":
-                headers = [(k, v) for k, v in message.get("headers", [])
-                           if k.decode("latin-1").lower() not in names]
-                headers += [(k.encode(), v.encode()) for k, v in sec]
-                message = {**message, "headers": headers}
+                response_headers = [
+                    (key, value)
+                    for key, value in message.get("headers", [])
+                    if key.decode("latin-1").lower() not in names
+                ]
+                response_headers += [(key.encode(), value.encode()) for key, value in sec]
+                message = {**message, "headers": response_headers}
             await send(message)
 
         started = False
@@ -343,7 +351,6 @@ class SecurityMiddleware:
         try:
             await self.app(scope, receive, tracked_send)
         except Exception:
-            # Gradio runs Starlette in debug mode, which would show a traceback page.
             log.exception("Unhandled server error")
             if started:
                 raise
