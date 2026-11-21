@@ -1,31 +1,36 @@
-
-# Environment variables and secrets
+# Environment secrets
 .env
 .env.*
 !.env.example
 
-# Google authentication credentials
-credentials.json
-token.json
-client_secret*.json
-
-# Database files
-*.db
-*.sqlite
-*.sqlite3
-
-# Python virtual environment
-venv/
-.venv/
-
 # Python cache
 __pycache__/
 *.py[cod]
+*$py.class
 
-# Backup files
-app_backup.py
-*.bak
+# Virtual environments
+venv/
+.venv/
+env/
 
-# IDE settings
+# IDE
 .vscode/
 .idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+
+# Test cache
+.pytest_cache/
+.mypy_cache/
+
+# Gradio cache
+.gradio/
