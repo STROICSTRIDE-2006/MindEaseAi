@@ -38,6 +38,31 @@ def base_url():
     return f"http://{host}:{port}"
 
 
+def providers() -> dict:
+    """Return configured external sign-in providers."""
+    client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
+
+    if not client_id or not client_secret:
+        return {}
+
+    return {
+        "google": {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+            "token_url": "https://oauth2.googleapis.com/token",
+            "userinfo_url": "https://openidconnect.googleapis.com/v1/userinfo",
+            "scope": "openid email profile",
+        }
+    }
+
+
+def enabled_providers() -> list[str]:
+    return list(providers().keys())
+
+
+
 def _cookie_secure(request):
     forwarded = request.headers.get("x-forwarded-proto", "").lower()
     return request.url.scheme == "https" or forwarded == "https"
