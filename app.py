@@ -18,7 +18,7 @@ import logging
 import sqlite3
 import threading
 import secrets
-import smtplib
+import smtplib  # Optional local-development fallback; Render should use Resend HTTPS.
 import hmac
 from email.message import EmailMessage
 from contextlib import contextmanager
@@ -833,6 +833,8 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "").strip()
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
 SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER).strip()
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
+RESEND_FROM_EMAIL = os.getenv("RESEND_FROM_EMAIL", SMTP_FROM).strip()
 OTP_TTL_SECONDS = 5 * 60
 OTP_RESEND_SECONDS = 60
 OTP_MAX_ATTEMPTS = 5
@@ -961,25 +963,66 @@ def otp_digest(email, code):
 
 
 def send_otp_email(email, code):
+    """
+    Deliver OTP through Resend's HTTPS API when configured.
+    HTTPS is the recommended production path on Render; SMTP remains an
+    optional fallback for local development or providers that permit it.
+    """
+    subject = "Your MindEase AI verification code"
+    body = (
+        f"Your MindEase AI verification code is: {code}\n\n"
+        "This code expires in 5 minutes and can only be used once.\n"
+        "If you did not request this code, you can ignore this email.\n\n"
+        "MindEase AI\n"
+        "Less thinking. More living.\n"
+    )
+
+    if RESEND_API_KEY:
+        if not RESEND_FROM_EMAIL:
+            raise RuntimeError(
+                "RESEND_FROM_EMAIL is missing. Set it to an address on your verified Resend domain."
+            )
+        try:
+            response = requests.post(
+                "https://api.resend.com/emails",
+                headers={
+                    "Authorization": f"Bearer {RESEND_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "from": RESEND_FROM_EMAIL,
+                    "to": [email],
+                    "subject": subject,
+                    "text": body,
+                },
+                timeout=20,
+            )
+        except requests.RequestException as error:
+            raise RuntimeError(f"Resend network request failed: {type(error).__name__}") from error
+
+        if not response.ok:
+            # Keep the provider response in server logs only; do not expose it to visitors.
+            try:
+                detail = response.text[:1000]
+            except Exception:
+                detail = "No response body"
+            log.error("Resend rejected OTP email (%s): %s", response.status_code, detail)
+            raise RuntimeError(f"Resend email API returned HTTP {response.status_code}.")
+        return
+
+    # Optional fallback for local development. On Render, configure Resend
+    # rather than relying on outbound SMTP connectivity.
     if not all([SMTP_HOST, SMTP_USER, SMTP_PASSWORD, SMTP_FROM]):
         raise RuntimeError(
-            "Email delivery is not configured. Add SMTP_HOST, SMTP_USER, "
-            "SMTP_PASSWORD and SMTP_FROM to your .env file."
+            "Email delivery is not configured. Set RESEND_API_KEY and "
+            "RESEND_FROM_EMAIL in Render environment variables."
         )
+
     message = EmailMessage()
-    message["Subject"] = "Your MindEase AI verification code"
+    message["Subject"] = subject
     message["From"] = SMTP_FROM
     message["To"] = email
-    message.set_content(
-        f"""Your MindEase AI verification code is: {code}
-
-This code expires in 5 minutes and can only be used once.
-If you did not request this code, you can ignore this email.
-
-MindEase AI
-Less thinking. More living.
-"""
-    )
+    message.set_content(body)
 
     attempts = [(SMTP_PORT, SMTP_PORT == 465)]
     if SMTP_PORT == 587:
@@ -988,7 +1031,6 @@ Less thinking. More living.
         attempts.append((587, False))
 
     failures = []
-
     for port, use_ssl in attempts:
         mode = "SSL" if use_ssl else "STARTTLS"
         try:
@@ -1003,18 +1045,17 @@ Less thinking. More living.
                     server.ehlo()
                     server.login(SMTP_USER, SMTP_PASSWORD)
                     server.send_message(message)
-            return  # sent successfully
-        except smtplib.SMTPAuthenticationError:
+            return
+        except smtplib.SMTPAuthenticationError as error:
             raise RuntimeError(
-                "Email login failed. For Gmail, use a 16-character App Password "
-                "(not your normal password) and make sure SMTP_USER is the same account."
-            )
+                "SMTP authentication failed. For Gmail, use a 16-character App Password."
+            ) from error
         except Exception as error:
-            failures.append(f"{SMTP_HOST}:{port} ({mode}) -> {type(error).__name__}: {error}")
+            failures.append(
+                f"{SMTP_HOST}:{port} ({mode}) -> {type(error).__name__}: {error}"
+            )
 
-    raise RuntimeError(
-        "Could not connect to the mail server. Tried: " + " | ".join(failures)
-    )
+    raise RuntimeError("Could not connect to the configured SMTP server. " + " | ".join(failures))
 
 
 def send_login_otp(email_value, request: gr.Request = None):
